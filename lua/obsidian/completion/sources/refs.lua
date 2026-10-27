@@ -34,6 +34,7 @@ local cache = require "obsidian.cache"
 ---@field block_link string|?
 ---@field anchor_link string|?
 ---@field new_text_to_option table<string, obsidian.completion.sources.refs.Options>
+---@field note_options table<obsidian.Note, table<string, string[]>>|? Link texts reused across requests, set only for cached notes
 
 local M = {}
 
@@ -586,6 +587,30 @@ local function strip_links(cc)
   cc.anchor_link = anchor ~= nil and header_parser.normalize_anchor(anchor) or nil
 end
 
+---@param note obsidian.Note
+---@param option { label: string, alt_label: string|?, anchor: obsidian.note.HeaderAnchor|?, block: obsidian.note.Block|? }
+---@param formatted_anchor obsidian.note.HeaderAnchor|?
+---@return string new_text
+---@return string final_label
+---@return string display_label
+local function note_option_texts(note, option, formatted_anchor)
+  local new_text = note:format_link { label = option.label, anchor = formatted_anchor, block = option.block }
+
+  local final_label = option.alt_label or option.label
+  local display_label = final_label
+  if option.anchor then
+    final_label = final_label .. option.anchor.anchor
+    local display_anchor = assert(formatted_anchor, "formatted heading anchor is required")
+    display_label = display_label
+      .. (Obsidian.opts.link.style == "wiki" and display_anchor.anchor or "#" .. option.anchor.header)
+  elseif option.block then
+    final_label = final_label .. "#" .. option.block.id
+    display_label = final_label
+  end
+
+  return new_text, final_label, display_label
+end
+
 ---@param cc obsidian.completion.sources.refs.Context
 ---@param label string|?
 ---@param alt_label string|?
@@ -620,19 +645,22 @@ local function update_completion_options(cc, label, alt_label, matching_anchors,
     local final_label, display_label, sort_text, new_text, documentation
     local formatted_anchor = wiki_completion_anchor(option.anchor)
     if option.label then
-      new_text = note:format_link { label = option.label, anchor = formatted_anchor, block = option.block }
-
-      final_label = option.alt_label or option.label
-      display_label = final_label
-      if option.anchor then
-        final_label = final_label .. option.anchor.anchor
-        local display_anchor = assert(formatted_anchor, "formatted heading anchor is required")
-        display_label = display_label
-          .. (Obsidian.opts.link.style == "wiki" and display_anchor.anchor or "#" .. option.anchor.header)
-      elseif option.block then
-        final_label = final_label .. "#" .. option.block.id
-        display_label = final_label
+      local texts
+      if cc.note_options then
+        local key = table.concat({
+          option.label,
+          option.alt_label or "",
+          option.anchor and option.anchor.anchor or "",
+          option.block and option.block.id or "",
+        }, "\0")
+        local per_note = cc.note_options[note] or {}
+        cc.note_options[note] = per_note
+        texts = per_note[key] or { note_option_texts(note, option, formatted_anchor) }
+        per_note[key] = texts
+      else
+        texts = { note_option_texts(note, option, formatted_anchor) }
       end
+      new_text, final_label, display_label = texts[1], texts[2], texts[3]
       sort_text = final_label
     elseif option.anchor then
       -- In buffer anchor link.
@@ -835,6 +863,37 @@ local function process_search_results(cc, results)
   }
 end
 
+---Cached notes of a workspace and the link texts formatted for them. The candidate set does not depend on
+---the query, so it is rebuilt only when the metadata cache or the link settings change.
+local cached_notes = require("obsidian.cache.volatile").vault_index {
+  version = function(context)
+    return context.version
+  end,
+  build = function(context, done)
+    local rows = cache.notes.all()
+    local paths = {}
+
+    for path in pairs(rows) do
+      if
+        fs_util.is_subpath(path, tostring(context.dir))
+        and (not context.templates_dir or not fs_util.is_subpath(path, tostring(context.templates_dir)))
+      then
+        paths[#paths + 1] = path
+      end
+    end
+    table.sort(paths)
+
+    local Note = require "obsidian.note"
+    ---@type obsidian.Note[]
+    local notes = {}
+    for _, path in ipairs(paths) do
+      notes[#notes + 1] = Note.from_cache(path, rows[path])
+    end
+
+    done { notes = notes, note_options = setmetatable({}, { __mode = "k" }) }
+  end,
+}
+
 ---Use cached metadata to return the complete ordinary note-reference candidate set.
 ---Completion clients can then apply their own fuzzy matcher without a filesystem search.
 ---@param cc obsidian.completion.sources.refs.Context
@@ -848,27 +907,30 @@ local function process_cached_search(cc)
   local dir = api.resolve_workspace_dir(source_path ~= "" and source_path or nil)
   local workspace = api.find_workspace(dir)
   local templates_dir = api.templates_dir(workspace)
-  local rows = cache.notes.all()
-  local paths = {}
+  local link = Obsidian.opts.link
 
-  for path in pairs(rows) do
-    if
-      fs_util.is_subpath(path, tostring(dir))
-      and (not templates_dir or not fs_util.is_subpath(path, tostring(templates_dir)))
-    then
-      paths[#paths + 1] = path
-    end
+  local index, build_err
+  cached_notes:get(tostring(dir), {
+    dir = dir,
+    templates_dir = templates_dir,
+    version = {
+      cache.generation(),
+      tostring(templates_dir),
+      link.style,
+      link.format,
+      link.format == "relative" and tostring(Obsidian.buf_dir) or nil,
+    },
+  }, function(value, err)
+    index, build_err = value, err
+  end)
+  if build_err ~= nil then
+    error(build_err)
+  elseif not index then
+    return false
   end
-  table.sort(paths)
 
-  local Note = require "obsidian.note"
-  ---@type obsidian.Note[]
-  local notes = {}
-  for _, path in ipairs(paths) do
-    notes[#notes + 1] = Note.from_cache(path, rows[path])
-  end
-
-  process_search_results(cc, include_loaded_notes(notes, dir, {}, true))
+  cc.note_options = index.note_options
+  process_search_results(cc, include_loaded_notes(vim.list_slice(index.notes), dir, {}, true))
   return true
 end
 
