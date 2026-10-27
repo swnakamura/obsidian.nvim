@@ -109,4 +109,65 @@ T["resolve_item"]["passes items with non-table data through unchanged"] = functi
   eq(nil, result.documentation)
 end
 
+T["register"] = new_set {
+  hooks = {
+    pre_case = function()
+      _G.saved_obsidian = rawget(_G, "Obsidian")
+      -- Echo the label so each test can tell which registrations are still resolvable.
+      _G.Obsidian = {
+        opts = {
+          resolvers = {
+            note_preview = function(ctx, done)
+              done(ctx.label)
+            end,
+          },
+        },
+      }
+    end,
+    post_case = function()
+      _G.Obsidian = _G.saved_obsidian
+      _G.saved_obsidian = nil
+    end,
+  },
+}
+
+local function resolved_label(data)
+  local label
+  docs.resolve_item({ data = data }, function(item)
+    label = item.documentation and item.documentation.value
+  end)
+  return label
+end
+
+T["register"]["evicts previous requests before a large current response"] = function()
+  local note = Note.new("foo", {}, {}, "/tmp/vault/foo.md")
+  docs.begin_request()
+  local previous = {}
+  for i = 1, 3000 do
+    previous[i] = docs.register { note = note, label = "previous " .. i }
+  end
+  eq("previous 1", resolved_label(previous[1]))
+
+  docs.begin_request()
+  local current = {}
+  for i = 1, 3000 do
+    current[i] = docs.register { note = note, label = "current " .. i }
+  end
+  eq(nil, resolved_label(previous[3000]))
+  eq("current 1", resolved_label(current[1]))
+  eq("current 3000", resolved_label(current[3000]))
+end
+
+T["register"]["caps a request that never ends"] = function()
+  local note = Note.new("foo", {}, {}, "/tmp/vault/foo.md")
+  docs.begin_request()
+  local data = {}
+  for i = 1, 5000 do
+    data[i] = docs.register { note = note, label = "entry " .. i }
+  end
+  eq(nil, resolved_label(data[904]))
+  eq("entry 905", resolved_label(data[905]))
+  eq("entry 5000", resolved_label(data[5000]))
+end
+
 return T

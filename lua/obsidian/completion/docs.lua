@@ -22,9 +22,10 @@ local M = {}
 ---@type table<integer, obsidian.completion.docs.Record>
 local contexts = {}
 
---- Registration order of keys, for FIFO eviction.
+--- Registration order of keys, for FIFO eviction. Live keys are `order[head..#order]`.
 ---@type integer[]
 local order = {}
+local head = 1
 
 local next_key = 0
 local generation = 0
@@ -37,21 +38,29 @@ local MAX_CONTEXTS = 1024
 --- Absolute cap, bounding flows that never advance the generation.
 local HARD_MAX_CONTEXTS = 4 * MAX_CONTEXTS
 
+local function live_count()
+  return #order - head + 1
+end
+
+local function evict_oldest()
+  contexts[order[head]] = nil
+  head = head + 1
+end
+
 local function evict_stale()
-  -- Drop entries from previous generations first, oldest first.
-  local i = 1
-  while #order > MAX_CONTEXTS and i <= #order do
-    local key = order[i]
-    if contexts[key].generation < generation then
-      contexts[key] = nil
-      table.remove(order, i)
-    else
-      i = i + 1
-    end
+  -- Keys are registered in request order, so the entries of previous requests are the oldest ones: no need
+  -- to scan past the first entry of the current request, and `table.remove` from the front would make each
+  -- registration O(n) once a cached-note response exceeds the cap.
+  while live_count() > MAX_CONTEXTS and contexts[order[head]].generation < generation do
+    evict_oldest()
   end
   -- Hard cap for flows that never advance the generation.
-  while #order > HARD_MAX_CONTEXTS do
-    contexts[table.remove(order, 1)] = nil
+  while live_count() > HARD_MAX_CONTEXTS do
+    evict_oldest()
+  end
+  if head > MAX_CONTEXTS and head > #order / 2 then
+    order = vim.list_slice(order, head)
+    head = 1
   end
 end
 
@@ -76,7 +85,7 @@ M.register = function(entry)
   contexts[key] = { entry = entry, generation = generation }
   order[#order + 1] = key
 
-  if #order > MAX_CONTEXTS then
+  if live_count() > MAX_CONTEXTS then
     evict_stale()
   end
 
