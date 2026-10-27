@@ -75,7 +75,7 @@ end
 ---@field anchor_links table<string, obsidian.note.HeaderAnchor>|?
 ---@field blocks table<string, obsidian.note.Block>?
 ---@field block_candidates obsidian.Section[]|? paragraphs that can receive block identifiers.
----@field sections obsidian.Section[]|? document-ordered sections, the first one is always the preamble.
+---@field sections obsidian.Section[]|? document-ordered sections, the first one is always the preamble. Notes built from the cache carry heading-only sections (header, anchor, level) reconstructed from the cached headings.
 ---@field alt_alias string|?
 ---@field bufnr integer|?
 ---@field template string|? Template name carried by the note. Used as the default `template` for `note:write` when no explicit value is passed.
@@ -646,7 +646,12 @@ end
 
 --- Get markdown display info about the note.
 ---
----@param opts { label: string|?, anchor: obsidian.note.HeaderAnchor|?, block: obsidian.note.Block|? }|?
+---@param opts {
+---   label: string|?,
+---   anchor: obsidian.note.HeaderAnchor|?,
+---   block: obsidian.note.Block|?,
+---   title: string|?,
+--- }|?
 ---
 ---@return string
 Note.display_info = function(self, opts)
@@ -664,7 +669,16 @@ Note.display_info = function(self, opts)
     info[#info + 1] = ("**path:** `%s`"):format(self.path)
   end
 
-  info[#info + 1] = ("**id:** `%s`"):format(self.id)
+  if opts.title ~= nil then
+    local title = vim.trim(opts.title)
+    if title ~= "" then
+      info[#info + 1] = ("**title:** %s"):format(title)
+    end
+  end
+
+  if self.id ~= nil then
+    info[#info + 1] = ("**id:** `%s`"):format(self.id)
+  end
 
   if #self.aliases > 0 then
     info[#info + 1] = ("**aliases:** '%s'"):format(table.concat(self.aliases, "', '"))
@@ -939,6 +953,21 @@ Note.from_cache = function(path, row)
   metadata.tags = metadata.tags or vim.deepcopy(row.tags or {})
   local note = Note.new(nil, nil, nil, path)
   note.metadata = metadata
+  if row.headings then
+    -- Reconstruct heading-only sections from the cached headings so the first
+    -- H1 is available without reading the note from disk. The other section
+    -- fields (ranges, parents) are not part of the cache rows.
+    local sections = {}
+    for _, heading in ipairs(row.headings) do
+      sections[#sections + 1] = {
+        header = heading.header,
+        anchor = heading.anchor,
+        level = heading.level,
+        heading_range = { start_row = heading.line - 1 },
+      }
+    end
+    note.sections = sections
+  end
   return note
 end
 

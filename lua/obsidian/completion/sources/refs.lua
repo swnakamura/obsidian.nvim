@@ -1,5 +1,6 @@
 --- TODO: make more declarative
 local completion = require "obsidian.completion.refs"
+local docs = require "obsidian.completion.docs"
 local util = require "obsidian.util"
 local fs_util = require "obsidian.util.fs"
 local compat = require "obsidian.compat"
@@ -182,15 +183,12 @@ local function make_block_completion_item(cc, range, placeholder, spec)
     label = spec.label,
     sortText = spec.sort_text,
     filterText = "[[" .. assert(cc.search, "block completion search is missing") .. " " .. spec.label,
-    documentation = {
-      kind = "markdown",
-      value = spec.note:display_info { label = spec.link, block = spec.block },
-    },
     kind = vim.lsp.protocol.CompletionItemKind.Reference,
     textEdit = {
       newText = spec.new_target and placeholder or spec.link,
       range = range,
     },
+    data = docs.register { note = spec.note, label = spec.link, block = spec.block },
   }
 
   local target = spec.new_target
@@ -522,20 +520,18 @@ local function process_heading_search_results(cc, query, results)
         format = link_format,
       }
       local label = anchor.header .. " — " .. note:display_name()
-      items[#items + 1] = {
+      local item = {
         label = label,
         sortText = ("%08d:%08d"):format(note_idx, anchor.line),
         filterText = "[[##" .. query .. " " .. anchor.header .. " " .. note:display_name(),
-        documentation = {
-          kind = "markdown",
-          value = note:display_info { label = link, anchor = anchor },
-        },
         kind = vim.lsp.protocol.CompletionItemKind.Reference,
         textEdit = {
           newText = link,
           range = range,
         },
+        data = docs.register { note = note, label = link, anchor = anchor },
       }
+      items[#items + 1] = item
     end
   end
 
@@ -638,15 +634,6 @@ local function update_completion_options(cc, label, alt_label, matching_anchors,
         display_label = final_label
       end
       sort_text = final_label
-
-      documentation = {
-        kind = "markdown",
-        value = note:display_info {
-          label = new_text,
-          anchor = option.anchor,
-          block = option.block,
-        },
-      }
     elseif option.anchor then
       -- In buffer anchor link.
       if Obsidian.opts.link.style == "wiki" then
@@ -722,6 +709,8 @@ local function update_completion_options(cc, label, alt_label, matching_anchors,
             sort_text = sort_text,
             documentation = documentation,
             note = note,
+            anchor = formatted_anchor,
+            block = option.block,
             disambiguated = true,
           }
         end
@@ -747,6 +736,8 @@ local function process_search_results(cc, results)
   if not cc.search then
     return
   end
+  ---@cast cc.insert_start -nil
+  ---@cast cc.insert_end -nil
   local completion_items = {}
 
   for _, note in ipairs(results) do
@@ -801,7 +792,20 @@ local function process_search_results(cc, results)
       error "not implemented"
     end
 
-    table.insert(completion_items, {
+    ---@type lsp.Range
+    local textedit_range = {
+      ["start"] = {
+        line = cc.request.line,
+        character = cc.insert_start,
+      },
+      ["end"] = {
+        line = cc.request.line,
+        character = cc.insert_end,
+      },
+    }
+
+    ---@type lsp.CompletionItem
+    local item = {
       documentation = option.documentation,
       sortText = option.sort_text,
       filterText = completion.get_filter_text(filter_label),
@@ -809,18 +813,20 @@ local function process_search_results(cc, results)
       kind = vim.lsp.protocol.CompletionItemKind.Reference,
       textEdit = {
         newText = option.new_text,
-        range = {
-          ["start"] = {
-            line = cc.request.line,
-            character = cc.insert_start,
-          },
-          ["end"] = {
-            line = cc.request.line,
-            character = cc.insert_end,
-          },
-        },
+        range = textedit_range,
       },
-    })
+    }
+
+    if option.note ~= nil then
+      item.data = docs.register {
+        note = option.note,
+        label = option.new_text,
+        anchor = option.anchor,
+        block = option.block,
+      }
+    end
+
+    completion_items[#completion_items + 1] = item
   end
 
   cc.completion_resolve_callback {
