@@ -174,15 +174,21 @@ end
 ---@param path string|obsidian.Path
 ---@return obsidian.Workspace|?
 M.find_workspace = function(path)
-  local normalized = vim.fs.normalize(tostring(Path.new(path):resolve()))
-  local match
-  for _, ws in ipairs(Obsidian.workspaces or {}) do
-    local root = vim.fs.normalize(tostring(ws.root))
-    if fs_util.is_subpath(normalized, root) and (not match or #root > #tostring(match.root)) then
-      match = ws
+  local function most_specific(normalized)
+    local match
+    for _, ws in ipairs(Obsidian.workspaces or {}) do
+      local root = vim.fs.normalize(tostring(ws.root))
+      if fs_util.is_subpath(normalized, root) and (not match or #root > #tostring(match.root)) then
+        match = ws
+      end
     end
+    return match
   end
-  return match
+
+  -- Match the path as given before resolving symlinks: resolving hits the filesystem, and
+  -- reference completion calls this for every candidate note on every keystroke.
+  return most_specific(vim.fs.normalize(tostring(path)))
+    or most_specific(vim.fs.normalize(tostring(Path.new(path):resolve())))
 end
 
 ---@param path string|obsidian.Path|?
