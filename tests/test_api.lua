@@ -32,6 +32,24 @@ T["workspace resolution"]["should resolve non-note and nonexistent paths in the 
   )
 end
 
+T["workspace resolution"]["should resolve a symlinked path in the workspace it points into"] = function()
+  eq(
+    "nested",
+    child.lua [[
+    local nested = Obsidian.dir / "nested"
+    nested:mkdir()
+    Obsidian.workspaces[#Obsidian.workspaces + 1] = require("obsidian.workspace").new {
+      name = "nested",
+      path = nested,
+      strict = true,
+    }
+    local link = vim.fn.tempname()
+    assert(vim.uv.fs_symlink(tostring(nested), link))
+    return M.resolve_workspace_dir(link .. "/note.md").name
+  ]]
+  )
+end
+
 T["toggle_checkbox"] = new_set()
 
 T["toggle_checkbox"]["should toggle between default states with - lists"] = function()
