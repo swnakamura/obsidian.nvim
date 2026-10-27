@@ -379,6 +379,56 @@ T["completion"]["cached note references use unsaved loaded metadata"] = function
   end), "stale cached alias was offered for a modified buffer")
 end
 
+T["completion"]["cached note references are reused until the cache changes"] = function()
+  h.mock_vault_contents(child.Obsidian.dir, {
+    ["source.md"] = "[[ta",
+    ["target.md"] = "---\naliases:\n  - Target Alias\n---\nTarget content",
+  })
+
+  child.lua [[require("obsidian.cache").setup { enabled = true, backend = "memory" }]]
+  h.child_wait(child, [[return require("obsidian.cache").is_ready()]], { desc = "cache ready" })
+  child.cmd("edit " .. tostring(child.Obsidian.dir / "source.md"))
+  child.api.nvim_win_set_cursor(0, { 1, 4 })
+
+  -- The "(create)" item comes from the new-note source and carries a fresh random ID on every request.
+  local function new_texts(result)
+    local texts = vim
+      .iter(result.items or {})
+      :filter(function(item)
+        return not vim.endswith(item.label, " (create)")
+      end)
+      :map(function(item)
+        return item.textEdit.newText
+      end)
+      :totable()
+    table.sort(texts)
+    return texts
+  end
+
+  local first = new_texts(run_completion(0, 4))
+  child.lua [[
+    local Note = require "obsidian.note"
+    local format_link = Note.format_link
+    _G.format_link_calls = 0
+    Note.format_link = function(self, ...)
+      -- The "(create)" item formats a link to a note that does not exist yet on every request.
+      if self:exists() then
+        _G.format_link_calls = _G.format_link_calls + 1
+      end
+      return format_link(self, ...)
+    end
+  ]]
+  eq(first, new_texts(run_completion(0, 4)))
+  eq(0, child.lua_get "_G.format_link_calls")
+
+  local added = tostring(child.Obsidian.dir / "added.md")
+  child.fn.writefile({ "Added content" }, added)
+  child.lua(
+    ([[require "obsidian.lsp.handlers.did_save" { textDocument = { uri = vim.uri_from_fname(%q) } }]]):format(added)
+  )
+  assert(vim.list_contains(new_texts(run_completion(0, 4)), "[[added]]"), "note added to the cache was not offered")
+end
+
 T["completion"]["searches vault headings without cache"] = function()
   h.mock_vault_contents(child.Obsidian.dir, {
     ["source.md"] = "[[##api",
