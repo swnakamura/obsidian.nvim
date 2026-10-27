@@ -138,3 +138,82 @@ resolvers = {
 ```
 
 The built-in resolver returns link-suggestion hints for the requested range. In insert mode, hints update with document changes except while the cursor is in a built-in completion expression (`[[`, `#`, or `[^`). During completion, the previous hint result is reused and no resolver is started; hints resume when completion ends or the cursor leaves the expression. A debounced refresh also follows normal-mode edits (including undo), leaving insert mode, and saving the note. Accepting a hint triggers a refresh.
+
+## Note preview resolver
+
+`opts.resolvers.note_preview` renders the preview/documentation lines shown for a note, currently as documentation of LSP completion items (wiki links, headings, blocks, and "create new note" entries). Later features like hover or picker previews can reuse it with a different `ctx.scope`.
+
+```lua
+---@class obsidian.resolver.NotePreviewCtx
+---@field scope string e.g. "lsp.completion"
+---@field note obsidian.Note
+---@field label string|?
+---@field anchor obsidian.note.HeaderAnchor|?
+---@field block obsidian.note.Block|?
+
+---@alias obsidian.resolver.NotePreviewResult string Markdown documentation.
+```
+
+The built-in resolver shows the note's path, then a `**title:**` line resolved from the frontmatter `title` (if set) or the first H1, followed by the id, aliases, and tags. It also shows the resolved link and the linked anchor/block when present. The H1 is read from the note's sections when they are available — including for notes served from the cache, whose sections are reconstructed from the cached headings — so resolving a preview never reads the note from disk.
+
+Documentation is resolved lazily: completion items carry an opaque `data` payload and the LSP `completionItem/resolve` request renders it through this resolver only for the item a client actually previews. When a custom resolver cancels or fails, the item falls back to the built-in rendering. As with all resolvers, `done` must eventually be called exactly once: the resolve response will never be sent otherwise, and clients that defer item acceptance until resolution (e.g. Neovim's built-in completion) will also not execute the item's command until then.
+
+Note: notes served from the note cache (see `cache.enabled`) carry heading-only sections reconstructed from the cached headings, so their H1 titles resolve without any file reads; frontmatter `title`s come from the cached properties.
+
+Example adding the creation date from frontmatter:
+
+```lua
+require("obsidian").setup {
+  resolvers = {
+    note_preview = function(ctx, done)
+      local created = ctx.note.metadata and ctx.note.metadata.created
+      local base = require("obsidian.resolvers").default_note_preview(ctx)
+      if created then
+        done(base .. "\n**created:** " .. tostring(created))
+      else
+        done(base)
+      end
+    end,
+  },
+}
+```
+
+Recipe: a `**preview:**` snippet fallback for notes without a title. The default intentionally only resolves semantic titles; if you also want a snippet of the body text when a note has neither a frontmatter `title` nor an H1, add it yourself:
+
+```lua
+require("obsidian").setup {
+  resolvers = {
+    note_preview = function(ctx, done)
+      local base = require("obsidian.resolvers").default_note_preview(ctx)
+      local note = ctx.note
+      if base:find("**title:**", 1, true) or note.contents == nil then
+        done(base)
+        return
+      end
+
+      -- First ~80 chars of body text, skipping frontmatter, blank lines,
+      -- code-fence markers, and headings.
+      local parts = {}
+      local first = (note.has_frontmatter and note.frontmatter_end_line or 0) + 1
+      for i = first, #note.contents do
+        local line = vim.trim(note.contents[i])
+        if line ~= "" and not line:match "^```" and not line:match "^#+%s" then
+          parts[#parts + 1] = line
+          if #table.concat(parts, " ") >= 80 then
+            break
+          end
+        end
+      end
+
+      local head = vim.trim(table.concat(parts, " "))
+      if head == "" then
+        done(base)
+      elseif vim.fn.strchars(head) > 80 then
+        done(base .. "\n**preview:** " .. vim.fn.strcharpart(head, 0, 79) .. "…")
+      else
+        done(base .. "\n**preview:** " .. head)
+      end
+    end,
+  },
+}
+```

@@ -1,4 +1,5 @@
 local completion = require "obsidian.completion.refs"
+local docs = require "obsidian.completion.docs"
 local util = require "obsidian.util"
 local date = require "obsidian.date"
 local link_parser = require "obsidian.link.parser"
@@ -148,12 +149,6 @@ function M.process_completion(callback, request)
       block = block,
       dir = source_path ~= "" and vim.fs.dirname(source_path) or nil,
     }
-    local documentation = {
-      kind = "markdown",
-      value = new_note:display_info {
-        label = "Create: " .. new_text,
-      },
-    }
 
     ---@type lsp.Range
     local range = {
@@ -171,7 +166,6 @@ function M.process_completion(callback, request)
 
     ---@type lsp.CompletionItem
     local item = {
-      documentation = documentation,
       sortText = new_note_opts.label,
       filterText = completion.get_filter_text(new_note_opts.label),
       label = label,
@@ -191,6 +185,7 @@ function M.process_completion(callback, request)
         newText = new_text,
         range = range,
       },
+      data = docs.register { note = new_note, label = "Create: " .. new_text },
     }
 
     items[#items + 1] = item
