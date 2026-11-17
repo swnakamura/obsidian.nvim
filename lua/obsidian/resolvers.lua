@@ -232,18 +232,10 @@ local function iter_body_lines(note)
     return function() end
   end
 
-  local i = (note.has_frontmatter and note.frontmatter_end_line or 0) + 1
-
-  if note.frontmatter_end_line == nil and contents[1] and contents[1]:match "^%-%-%-+$" then
-    -- Contents may be lazily loaded without frontmatter metadata (e.g. notes
-    -- built from the cache), in which case the frontmatter is still part of
-    -- `contents`. Skip it so its comments are never mistaken for content.
-    i = 2
-    while i <= #contents and not (contents[i] or ""):match "^%-%-%-+$" do
-      i = i + 1
-    end
-    i = i + 1
-  end
+  -- Not `replaceable_frontmatter_range()`: an unterminated frontmatter must be
+  -- skipped too, or its yaml comments would be read as headings.
+  local frontmatter = note:parsed_document().frontmatter
+  local i = frontmatter and frontmatter.range.end_row + 1 or 1
 
   local in_obsidian_comment = false
   local in_html_comment = false
