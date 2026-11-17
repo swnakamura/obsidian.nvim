@@ -64,6 +64,7 @@ local backends = {
 ---@field unregister fun()|nil
 ---@field ready boolean
 ---@field pending fun()[]
+---@field scan_touched table<string, true>|nil paths changed by watched-file events during the running scan
 
 ---@type obsidian.cache.State?
 local state = nil
@@ -241,6 +242,12 @@ local function on_events(events)
   local FileChangeType = vim.lsp.protocol.FileChangeType
   for _, ev in ipairs(events) do
     local path = event_path(ev)
+    local touched = state and state.scan_touched
+    if touched then
+      for _, p in pairs { path, ev.old_path, ev.new_path } do
+        touched[vim.fs.normalize(p)] = true
+      end
+    end
     if
       ev.type == "created"
       or ev.type == "changed"
@@ -283,41 +290,107 @@ local function entry_matches(row, path, stat)
   return kind ~= "attachment" or row.extension == filetypes.extension(path)
 end
 
+---Run a libuv fs request on the thread pool and its callback on the main loop
+---(`async`), or run both inline.
+---@param async boolean
+---@param fn fun(path: string, cb: function?): any
+---@param path string
+---@param cb fun(err: string?, result: any)
+local function fs_request(async, fn, path, cb)
+  if async then
+    fn(path, vim.schedule_wrap(cb))
+  else
+    local result, err = fn(path)
+    cb(err, result)
+  end
+end
+
 ---Walk vault, populate cache for all supported notes and attachments. Skips entries whose mtime/size match.
----@param force boolean? rebuild every entry regardless of stat
-local function initial_scan(force)
+---
+---With `opts.async`, directory reads and stats run on libuv's thread pool and
+---each result is handled in its own main-loop callback, so a large vault never
+---blocks the editor for the whole walk; `opts.on_done` runs once the cache
+---matches the vault. Without it, the walk finishes before this returns.
+---@param opts { force: boolean?, async: boolean?, on_done: fun()? }?
+local function initial_scan(opts)
+  opts = opts or {}
   if not state then
     return
   end
   local scan_state = state
+  local async = opts.async == true
   local found = {}
-  local files = vim.fs.find(function(name, dir)
-    if not filetypes.kind(name) then
-      return false
-    end
-    local path = dir .. "/" .. name
-    return not is_internal(path) and not is_ignored(path)
-  end, { type = "file", path = scan_state.vault, limit = math.huge })
+  -- Paths changed by watched-file events while an async walk is in flight: the
+  -- walk may have read their directory before they appeared, so their absence
+  -- from `found` does not mean they are gone.
+  local touched = {}
+  scan_state.scan_touched = touched
+  local pending = 0
+  local finished = false
 
-  for _, abs in ipairs(files) do
-    if not is_internal(abs) and not is_ignored(abs) then
-      abs = vim.fs.normalize(abs)
-      found[abs] = true
-      local existing = scan_state.backend:get(abs)
-      local stat = vim.uv.fs_stat(abs)
-      if stat and (force or not entry_matches(existing, abs, stat)) then
-        reindex_one(abs)
+  local function cancelled()
+    return state ~= scan_state or scan_state.scan_touched ~= touched
+  end
+
+  local function finish_if_idle()
+    if pending > 0 or finished or cancelled() then
+      return
+    end
+    finished = true
+    scan_state.scan_touched = nil
+    for path, _ in pairs(scan_state.backend:all()) do
+      local normalized = vim.fs.normalize(path)
+      if not found[normalized] and not touched[normalized] then
+        scan_state.backend:delete(path)
+        schedule_flush()
       end
     end
-  end
-
-  for path, _ in pairs(scan_state.backend:all()) do
-    local normalized = vim.fs.normalize(path)
-    if not found[normalized] then
-      scan_state.backend:delete(path)
-      schedule_flush()
+    if opts.on_done then
+      opts.on_done()
     end
   end
+
+  local function check_file(path)
+    pending = pending + 1
+    fs_request(async, vim.uv.fs_stat, path, function(_, stat)
+      pending = pending - 1
+      if not cancelled() and stat and (opts.force or not entry_matches(scan_state.backend:get(path), path, stat)) then
+        reindex_one(path)
+      end
+      finish_if_idle()
+    end)
+  end
+
+  local function visit_dir(dir)
+    pending = pending + 1
+    fs_request(async, vim.uv.fs_scandir, dir, function(_, req)
+      if req and not cancelled() then
+        while true do
+          local name, type_ = vim.uv.fs_scandir_next(req)
+          if not name then
+            break
+          end
+          local path = dir .. "/" .. name
+          if type_ == "directory" then
+            -- Everything below an internal directory is internal too.
+            if not is_internal(path) then
+              visit_dir(path)
+            end
+          elseif type_ == "file" and filetypes.kind(name) and not is_internal(path) and not is_ignored(path) then
+            path = vim.fs.normalize(path)
+            found[path] = true
+            check_file(path)
+          end
+        end
+      end
+      -- Decremented only after the entries are queued, so a synchronous walk
+      -- cannot reach zero (and finish) while this directory is half done.
+      pending = pending - 1
+      finish_if_idle()
+    end)
+  end
+
+  visit_dir(scan_state.vault)
 end
 
 local function mark_ready()
@@ -431,8 +504,7 @@ function M.setup(opts)
     if state ~= setup_state then
       return
     end
-    initial_scan()
-    mark_ready()
+    initial_scan { async = true, on_done = mark_ready }
   end)
 
   vim.api.nvim_create_autocmd("VimLeavePre", {
@@ -686,7 +758,10 @@ function M.notes.reindex()
   if not state then
     return
   end
-  initial_scan(true)
+  initial_scan { force = true }
+  -- A synchronous rebuild supersedes a startup scan still in flight, which
+  -- then never calls its `on_done`.
+  mark_ready()
 end
 
 -- ──────────────────────────────────────────────────────────────────────────────

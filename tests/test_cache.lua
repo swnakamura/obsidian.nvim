@@ -345,6 +345,84 @@ T["cache backends"]["hides persisted rows until startup validation finishes"] = 
   eq({ "fresh" }, cache.notes.find(note_path).tags)
 end
 
+---Memory store whose first `get` (made once the startup walk has listed the
+---vault and is checking a file) runs `on_first_get`.
+local function store_with_first_get_hook(on_first_get)
+  local store = { data = {} }
+  local hooked = false
+  function store:get(key)
+    if not hooked then
+      hooked = true
+      on_first_get()
+    end
+    return self.data[key]
+  end
+  function store:all()
+    return self.data
+  end
+  function store:put(key, row)
+    self.data[key] = row
+  end
+  function store:delete(key)
+    self.data[key] = nil
+  end
+  function store:flush() end
+  function store:close() end
+  return store
+end
+
+T["cache backends"]["keeps files created by watched-file events during the startup walk"] = function()
+  local dir = Path.temp { suffix = "-obsidian-cache" }
+  dir:mkdir { parents = true }
+  helpers.write("#early", tostring(dir / "Early.md"))
+  local late_path = tostring(dir / "Late.md")
+  Obsidian = { dir = dir }
+
+  local cache = require "obsidian.cache"
+  cache.register("late-file-test", {
+    open = function()
+      return store_with_first_get_hook(function()
+        helpers.write("#late", late_path)
+        require("obsidian.lsp.watchfiles").handle {
+          { type = "created", path = late_path },
+        }
+      end)
+    end,
+  })
+
+  cache.setup { enabled = true, backend = "late-file-test" }
+  vim.wait(1000, function()
+    return cache.is_ready()
+  end)
+  eq(true, cache.is_ready())
+  eq({ "early" }, cache.notes.get(tostring(dir / "Early.md")).tags)
+  eq({ "late" }, cache.notes.get(late_path).tags)
+end
+
+T["cache backends"]["rebuild during the startup walk still marks the cache ready"] = function()
+  local dir = Path.temp { suffix = "-obsidian-cache" }
+  dir:mkdir { parents = true }
+  local note_path = tostring(dir / "Note.md")
+  helpers.write("#one", note_path)
+  Obsidian = { dir = dir }
+
+  local cache = require "obsidian.cache"
+  cache.register("rebuild-midway-test", {
+    open = function()
+      return store_with_first_get_hook(function()
+        cache.notes.reindex()
+      end)
+    end,
+  })
+
+  cache.setup { enabled = true, backend = "rebuild-midway-test" }
+  vim.wait(1000, function()
+    return cache.is_ready()
+  end)
+  eq(true, cache.is_ready())
+  eq({ "one" }, cache.notes.get(note_path).tags)
+end
+
 T["cache backends"]["refreshes directly on LSP didSave"] = function()
   local dir = Path.temp { suffix = "-obsidian-cache" }
   dir:mkdir { parents = true }
